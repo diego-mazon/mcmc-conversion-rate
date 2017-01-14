@@ -1,4 +1,5 @@
 import sys
+import time
 
 from collections import defaultdict
 import itertools
@@ -44,15 +45,20 @@ def mcmc(m, n, n_samples=20000, n_kept_samples=10000, show_plots=False):
 	   	m_obs = pm.Poisson("m_obs", lambda_, observed=m)
 	   	n_obs = pm.Binomial("n_obs", m, p, observed=n)
 
+	   	t1 = time.time()
 	   	start = pm.find_MAP()
-	   	step = pm.Metropolis()    	
-	   	trace = pm.sample(n_samples, step=step, start=start, 
-	   						#njobs=4
+	   	step = pm.Metropolis() 
+	   	t2 = time.time()   	
+	   	trace = pm.sample(n_samples, step=step
+	   						#, njobs=4 
+	   						, start=start
 	   						)
 	   	burned_trace = trace[-n_kept_samples:]
+	   	print "t2 - t1=", t2-t1
 
 	lambda_samples = burned_trace['lambda_']
 	p_samples = burned_trace['p']
+
 
 	if show_plots:
 		#pm.plots.traceplot(trace=burned_trace, varnames=["lambda_", "p"])
@@ -161,13 +167,13 @@ def ratio_marginal_distr(z, lambda_samples, p_samples):
 	distr *= 1./(len(lambda_samples) * len(p_samples))
 	return distr
 
-def compare(sizes, models, proportions, test_size=1000):
+def compare(sizes, models, proportions):
 
 	nrows = len(models) * len(proportions)
 	fig, axes = plt.subplots(nrows=len(sizes), ncols=nrows, figsize=(22,10))
 
 	for ax, size in zip(axes[:,0], sizes):
-		ax.set_ylabel("train_size:%d" % size, rotation=0, size='large')
+		ax.set_ylabel("train_size=%d" % size, rotation=0, size='large')
 		ax.yaxis.set_label_coords(-0.2, 0.5)
 
 	rows = list(itertools.product(models, proportions))
@@ -176,6 +182,7 @@ def compare(sizes, models, proportions, test_size=1000):
 					", ".join(str(k)+"="+str(v) 
 					for k, v in model.items() if k != "name")
 					 + ", p=%.2f" % p)
+	
 
 	for i, size in enumerate(sizes):
 		print "size =", size
@@ -187,32 +194,37 @@ def compare(sizes, models, proportions, test_size=1000):
 			m_tr, n_tr = data(p=p, size=size, sample_from=model['name'], 
 								lambda_=model.get('lambda'), low=model.get('low'), 
 								high=model.get('high'))	
-			m_test, n_test = data(p=p, size=test_size, sample_from=model['name'], 
+			m_test, n_test = data(p=p, size=size, sample_from=model['name'], 
 								lambda_=model.get('lambda'), low=model.get('low'), 
 								high=model.get('high'))	
 			ratios = ratio(m_tr, n_tr)
 			ratios_test = ratio(m_test, n_test)
 			axes[i][j].hist(ratios_test, bins=20, normed=True, alpha=0.3, 
 							label='Empirical test data')
+		
 
 			# Kernel density estimation.
 			x = np.arange(0, 1.01, 0.01)
 			kde = stats.gaussian_kde(ratios)
-			kde_data = kde.resample(size=test_size).reshape(test_size, )
+			kde_data = kde.resample(size=size).reshape(size, )
 			p_value = 100 * stats.ks_2samp(kde_data, ratios_test)[1]
 			axes[i][j].plot(x, kde(x), label='KDE: %.0f%%' % p_value)
+			
 
 			# # Markov-chain Monte-Carlo simulation.
 			# # Generate posterior.
-			# n_samples = 100
-			# n_kept_samples = 50
-			# lambda_samples, p_samples = mcmc(m_tr, n_tr, n_samples, n_kept_samples, 
-			# 									show_plots=False)
-			lambda_samples = [5]
-			p_samples = [0.3]
+			t0 = time.time()
+			n_samples = 1000
+			n_kept_samples = 50
+			lambda_samples, p_samples = mcmc(m_tr, n_tr, n_samples, n_kept_samples, 
+												show_plots=False)
+			t3 = time.time()
+			# lambda_samples = [2, 3]
+			# p_samples = [0.1, 0.5]
 			## Compute probability distribution.
 			ratio_pmd = ratio_marginal_distr_table(lambda_samples, p_samples, 
 												ratio=True, counting=False)
+			t4 = time.time()
 			z, prob = zip(*sorted(ratio_pmd.items(), key=lambda x:x[0]))
 			#print "len(z) =", len(z)
 			prob_density = [(abs(prob[k+1] - prob[k]))*1./(z[k+1] - z[k]) 
@@ -224,32 +236,36 @@ def compare(sizes, models, proportions, test_size=1000):
 			sum_prob = sum(prob)
 			#print "sum(prob) before renormalizing", sum_prob
 			prob = np.array(prob) / sum_prob 
-			data_mcmc = np.random.choice(z, size=test_size, replace=True, p=prob)
+			data_mcmc = np.random.choice(z, size=size, replace=True, p=prob)
 			p_value = 100 * stats.ks_2samp(data_mcmc, ratios_test)[1]
 			axes[i][j].plot(z[:-1], smooth, label='MCMC: %.f%%' % p_value)
+			t5 = time.time()
+			print t0, t3-t0, t4-t3, t5-t4
 
 			# Beta distribution with method of moments
 			a = n_tr.mean()
 			b = m_tr.mean() - a
 			beta = stats.beta(a, b)
-			data_beta = beta.rvs(size=test_size)
+			data_beta = beta.rvs(size=size)
 			p_value = 100 * stats.ks_2samp(data_beta, ratios_test)[1]
-			axes[i][j].plot(x, beta.pdf(x), label='Beta. Moments: %.0f%%' % p_value)
+			axes[i][j].plot(x, beta.pdf(x), label='Beta Moments: %.0f%%' % p_value)
 
 			# Beta distribution with MLE
 			param = stats.beta.fit(ratios)
 			# print "beta param", param
 			pdf_fitted = stats.beta.pdf(x, *param[:-2], loc=param[-2], 
 										scale=param[-1])
-			data_beta_mle = stats.beta(*param).rvs(size=test_size)
+			data_beta_mle = stats.beta(*param).rvs(size=size)
 			p_value = 100 * stats.ks_2samp(data_beta_mle, ratios_test)[1]
 			axes[i][j].plot(x, pdf_fitted, label="Beta MLE: %.0f%%" % p_value)
+
 
 			axes[i][j].set_ylim(0, 4)
 			axes[i][j].set_xlim(-0.1, 1.1)
 			axes[i][j].legend(loc='best', fontsize=10)
 	
 	plt.show()
+
 
 
 def main():
@@ -283,7 +299,7 @@ def main():
 	# Markov-chain Monte-Carlo simulation.
 	# Generate posterior.
 	n_samples = 1500
-	n_kept_samples = 100
+	n_kept_samples = 500
 	lambda_samples, p_samples = mcmc(m, n, n_samples, n_kept_samples, 
 										show_plots=False)
 	# lambda_samples = [lambda_]
@@ -342,14 +358,13 @@ def main():
 
 if __name__ == '__main__':
 
-	proportions = [0.3]
-	sizes = [20, 20]
-	test_size = 1000
+	proportions = [0.1]
+	sizes = [50, 500]
 	models = []
-	models.append({'name':'poisson', 'lambda': 10})
-	models.append({'name':'poisson', 'lambda': 10})
-	#models.append({'name':'randint', 'low': 3, 'high': 10})
-	print compare(sizes, models, proportions, test_size)
+	models.append({'name':'poisson', 'lambda': 3.5})
+	models.append({'name':'poisson', 'lambda': 10.})
+	models.append({'name':'uniform', 'low': 1, 'high': 5})
+	compare(sizes, models, proportions)
 	sys.exit(1)
 
 
